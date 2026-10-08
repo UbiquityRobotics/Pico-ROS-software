@@ -30,7 +30,7 @@
 /** @brief Maximum number of strings in a single parameter request
  * (prefixes for list, parameters for get/set)
  * @ingroup picoparams */
-#define PP_MAX_REQUEST_STRINGS 50
+#define PP_MAX_REQUEST_STRINGS 100
 
 
  /**

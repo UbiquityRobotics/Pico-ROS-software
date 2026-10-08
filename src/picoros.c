@@ -179,23 +179,34 @@ static void queriable_data_handler(z_loaned_query_t *query, void *arg) {
         z_owned_bytes_t reply_payload;
         z_bytes_copy_from_buf(&reply_payload, reply.data, reply.length);
 
-        // rmw attachment
-        srv->attachment.sequence_number = 1;
-        srv->attachment.time = z_clock_now().tv_nsec;
+        // rmw attachment: echo incoming request attachment (sequence number, GID, timestamp)
         z_query_reply_options_t options;
         z_query_reply_options_default(&options);
         z_owned_bytes_t tx_attachment;
-        z_bytes_from_static_buf(&tx_attachment, (uint8_t*)&srv->attachment, sizeof(rmw_attachment_t));
+        const z_loaned_bytes_t *in_att = z_query_attachment(query);
+        size_t att_len = in_att ? _z_bytes_len(in_att) : 0;
+        if (att_len > 0) {
+            uint8_t *att_buf = (uint8_t*)z_malloc(att_len);
+            if (att_buf) {
+                _z_bytes_to_buf(in_att, att_buf, att_len);
+                z_bytes_copy_from_buf(&tx_attachment, att_buf, att_len);
+                z_free(att_buf);
+            } else {
+                z_bytes_from_static_buf(&tx_attachment, (uint8_t*)&srv->attachment, sizeof(rmw_attachment_t));
+            }
+        } else {
+            srv->attachment.sequence_number = 1;
+            srv->attachment.time = z_clock_now().tv_nsec;
+            z_bytes_from_static_buf(&tx_attachment, (uint8_t*)&srv->attachment, sizeof(rmw_attachment_t));
+        }
         options.attachment = z_bytes_move(&tx_attachment);
 
-        // send reply
+        // send reply (z_query_reply takes ownership and drops reply_payload)
         z_result_t res = z_query_reply(query, z_query_keyexpr(query), z_bytes_move(&reply_payload), &options);
         if (res != Z_OK) {
             _PR_LOG("Error sending service reply. Error:%d\n", res);
         }
 
-        // cleanup
-        z_bytes_drop(z_bytes_move(&reply_payload));
         if (reply.free_callback != NULL) {
             reply.free_callback(reply.data);
         }
@@ -313,8 +324,15 @@ picoros_res_t picoros_single_threaded_loop(picoros_interface_t* ifx){
 #endif
 
 bool picoros_interface_is_up(void) {
-    return ( zp_read_task_is_running(z_session_loan(&s_wrapper))
-    || zp_lease_task_is_running(z_session_loan(&s_wrapper)) );
+    const z_loaned_session_t *zs = z_session_loan(&s_wrapper);
+    if (z_session_is_closed(zs)) {
+        return false;
+    }
+    const _z_transport_common_t *tc = _z_transport_get_common((_z_transport_t *)&_Z_RC_IN_VAL(zs)->_tp);
+    if (tc == NULL || tc->_state != _Z_TRANSPORT_STATE_OPEN) {
+        return false;
+    }
+    return zp_read_task_is_running(zs);
 }
 
 void picoros_interface_close(void) {

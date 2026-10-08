@@ -168,10 +168,12 @@ static size_t serialize_ros_ParameterValue(ucdrBuffer* writer, pp_ParameterValue
 }
 
 static void deserialize_ros_ParameterValue(ucdrBuffer* reader, pp_ParameterValue* val){
-    bool    d_bool;
-    int64_t d_int;
-    double  d_double;
-    uint32_t size;
+    bool    d_bool = false;
+    int64_t d_int = 0;
+    double  d_double = 0.0;
+    char*   d_string = NULL;
+    uint32_t size = 0;
+
     val->length = 1;
     ucdr_deserialize_uint8_t(reader, &val->type);
 
@@ -182,55 +184,66 @@ static void deserialize_ros_ParameterValue(ucdrBuffer* reader, pp_ParameterValue
     ucdr_deserialize_bool(reader, &d_bool);
     ucdr_deserialize_int64_t(reader, &d_int);
     ucdr_deserialize_double(reader, &d_double);
+    ucdr_deserialize_rstring(reader, &d_string);
+
     if (val->type == PARAMETER_BOOL){
         val->val_bool = d_bool;
-        return;
-    }
-    if (val->type == PARAMETER_INTEGER){
+    } else if (val->type == PARAMETER_INTEGER){
         val->val_int = d_int;
-        return;
-    }
-    if (val->type == PARAMETER_DOUBLE){
+    } else if (val->type == PARAMETER_DOUBLE){
         val->val_double = d_double;
-        return;
+    } else if (val->type == PARAMETER_STRING){
+        val->val_string = d_string;
     }
 
-    ucdr_deserialize_rstring(reader, &val->val_string);
-
+    // byte_array_value
+    ucdr_deserialize_uint32_t(reader, &size);
     if (val->type == PARAMETER_BYTE_ARRAY){
-        ucdr_deserialize_uint32_t(reader, &val->length);
-        // default format is LE so we can just take pointers
-        val->val_bytearray = reader->iterator;
+        val->length = size;
+        val->val_bytearray = (uint8_t*)reader->iterator;
     }
-    else{
-        ucdr_deserialize_uint32_t(reader, &size);
+    if (size > 0){
+        ucdr_advance_buffer(reader, size);
     }
+
+    // bool_array_value
+    ucdr_deserialize_uint32_t(reader, &size);
     if (val->type == PARAMETER_BOOL_ARRAY){
-        ucdr_deserialize_uint32_t(reader, &val->length);
+        val->length = size;
         val->val_boolarray = (bool*)reader->iterator;
     }
-    else{
-        ucdr_deserialize_uint32_t(reader, &size);
+    if (size > 0){
+        ucdr_advance_buffer(reader, size);
     }
-    if (val->type == PARAMETER_INTEGER_ARRAY){
-        ucdr_deserialize_uint32_t(reader, &val->length);
-        val->val_intarray = (int64_t*)reader->iterator;
+
+    // integer_array_value
+    ucdr_deserialize_uint32_t(reader, &size);
+    if (size > 0){
+        ucdr_align_to(reader, 8);
+        if (val->type == PARAMETER_INTEGER_ARRAY){
+            val->length = size;
+            val->val_intarray = (int64_t*)reader->iterator;
+        }
+        ucdr_advance_buffer(reader, size * sizeof(int64_t));
     }
-    else{
-        ucdr_deserialize_uint32_t(reader, &size);
+
+    // double_array_value
+    ucdr_deserialize_uint32_t(reader, &size);
+    if (size > 0){
+        ucdr_align_to(reader, 8);
+        if (val->type == PARAMETER_DOUBLE_ARRAY){
+            val->length = size;
+            val->val_doublearray = (double*)reader->iterator;
+        }
+        ucdr_advance_buffer(reader, size * sizeof(double));
     }
-    if (val->type == PARAMETER_DOUBLE_ARRAY){
-        ucdr_deserialize_uint32_t(reader, &val->length);
-        val->val_doublearray = (double*)reader->iterator;
+
+    // string_array_value
+    ucdr_deserialize_uint32_t(reader, &size);
+    for (uint32_t i = 0; i < size; ++i){
+        char* dummy_str = NULL;
+        ucdr_deserialize_rstring(reader, &dummy_str);
     }
-    else{
-        ucdr_deserialize_uint32_t(reader, &size);
-    }
-//    if (val->type == PARAMETER_STRING_ARRAY){
-//    }
-//    else{
-//        ucdr_deserialize_uint32_t(reader, &size);
-//    }
 }
 
 static size_t serialize_rcl_ParameterDescriptor(ucdrBuffer* writer, pp_ParameterDescriptor* pd){
@@ -331,13 +344,14 @@ static size_t set_params_value(picoparams_server_t* server, ucdrBuffer* reader, 
     for (int i = 0; i < n_targets; i++){
         ucdr_deserialize_rstring(reader, &path);
         void* param = pserver.interface.f_ref(path);
+        pp_ParameterValue val = {};
+        deserialize_ros_ParameterValue(reader, &val);
+
         if(param == NULL){
             ucdr_serialize_bool(writer, false);
             ucdr_serialize_string(writer, "Parameter not found");
             continue;
         }
-        pp_ParameterValue val = {};
-        deserialize_ros_ParameterValue(reader, &val);
         char* error_msg = NULL;
         bool status = pserver.interface.f_set(param, &val, &error_msg);
         ucdr_serialize_bool(writer, status);
@@ -416,6 +430,10 @@ picoros_service_reply_t params_server_handler(picoros_srv_server_t* server, uint
     }
     else if(server == &pserver.set_atomic_srv){
         // Not implemented
+    }
+
+    if (querry_writter.error || ret > pserver.interface.reply_buf_size - 4) {
+        ret = pserver.interface.reply_buf_size - 4;
     }
 
     reply.data = pserver.interface.reply_buf;
